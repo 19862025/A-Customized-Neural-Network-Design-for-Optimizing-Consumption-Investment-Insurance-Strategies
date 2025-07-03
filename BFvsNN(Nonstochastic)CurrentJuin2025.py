@@ -18,6 +18,7 @@ T = 40
 r_t = np.full(T, 0.02)
 R_t = np.linspace(5, 7, T)
 X_init = 1
+X_max = 100 # expected maximum final wealth -- needed for secant method
 pd_t = np.linspace(0.001, 0.01, T+1)
 Pbard_t = 1 - np.cumsum(pd_t)
 D_t = 0.995**np.arange(T+1)
@@ -27,8 +28,11 @@ alpha_t = pd_t[:-1] * 1.0  # Scenario with scale = 1.0
 delta = 0.5
 epsilon = 0.9
 C0, X0 = 1, 1
-K = (epsilon/delta) * C0**delta / X0**epsilon
-betaMax = 1
+# !!! Definition of K was incorrect
+Kinv = (epsilon/delta) * C0**delta / X0**epsilon
+K = 1/Kinv
+# !!! Maximum amount allowed to pay for insurance
+betaMax = 20
 
 def VC_prime(C):
     return ((C >= 0) * C + (C <= 0) * 1e-3) ** (delta - 1)
@@ -83,16 +87,17 @@ def fixed_point_function(X_T, X_init, r_t, alpha_t, pD_t, PbarD_t):
     return X_forward[-1] - X_T
 
 # Run backward-forward model
-result = root_scalar(fixed_point_function, args=(X_init, r_t, alpha_t, pD_t, PbarD_t), x0=1, method='secant', xtol=1e-2)
+result = root_scalar(fixed_point_function, args=(X_init, r_t, alpha_t, pD_t, PbarD_t), x0=X_init, x1 = X_max,method='secant', xtol=1e-2)
 X_bf, C_bf, beta_bf = backward_solve(result.root, r_t, alpha_t, pD_t, PbarD_t)
 
 # NN model parameters (aligned with backward-forward)
 J = 3200
+nn_epochs = 40
 M = 3
 sigma_Z = 0.0
 sigma_S = 0.0
 r = 0.02
-Z0 = 0.025
+Z0 = 0.00 # To compare with deterministic
 alpha_scale = 1.0
 utility_factor = 1/T**2
 R = R_t  # Use backward-forward income
@@ -211,7 +216,7 @@ def extract_policy2(concatenated_outputs, T):
 nodeParams = [15, 0]
 nodeConfig = (nodeParams[0] * np.ones(T) + nodeParams[1] * np.arange(T)).astype(int)
 model, normalizer = build_custom_model(T, M, nodeConfig, utility_factor)
-history = model.fit(x_train, [y_train, [tf.zeros((J, 4)) for _ in range(T)]], epochs=30, batch_size=32, verbose=0)
+history = model.fit(x_train, [y_train, [tf.zeros((J, 4)) for _ in range(T)]], epochs=nn_epochs, batch_size=32, verbose=0)
 _, layer_outputs = model(x_train)
 concatenated_outputs = tf.keras.layers.Concatenate()(layer_outputs + [x_train[:, M:]])
 c_nn, b_nn, rho_nn, x_nn = extract_policy2(concatenated_outputs, T)
@@ -222,7 +227,8 @@ x_nn_mean = np.mean(x_nn, axis=0)
 # Compute utilities
 def compute_utility_bf(X, C, beta):
     consumption_utility = np.sum(VC(C) * PbarD_t[:-1])
-    legacy_term = X[:-1] * (1 + beta / (alpha_t + 1e-6))
+    # !!! Note error here: beta does not multiply X
+    legacy_term = X[:-1]  + beta / (alpha_t + 1e-6)
     legacy_utility = np.sum(VX(legacy_term) * pD_t)
     terminal_utility = VX(X[-1]) * PbarD_t[-1]
     return consumption_utility + legacy_utility + terminal_utility
