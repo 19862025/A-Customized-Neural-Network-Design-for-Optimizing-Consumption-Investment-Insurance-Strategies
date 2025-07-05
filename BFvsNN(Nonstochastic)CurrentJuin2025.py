@@ -18,13 +18,13 @@ T = 40
 r_t = np.full(T, 0.02)
 R_t = np.linspace(5, 7, T)
 X_init = 1
-X_max = 100 # expected maximum final wealth -- needed for secant method
+X_max = T*R_t[-1] # estimated upper bound for final wealth -- needed for secant method
 pd_t = np.linspace(0.001, 0.01, T+1)
 Pbard_t = 1 - np.cumsum(pd_t)
 D_t = 0.995**np.arange(T+1)
 pD_t = (pd_t * D_t)[:-1]  # Shape (T,)
 PbarD_t = Pbard_t * D_t
-alpha_t = pd_t[:-1] * 1.0  # Scenario with scale = 1.0
+alpha_t = pd_t[:-1] * 0.6  # Scenario with scale = 1.0
 delta = 0.5
 epsilon = 0.9
 C0, X0 = 1, 1
@@ -32,7 +32,7 @@ C0, X0 = 1, 1
 Kinv = (epsilon/delta) * C0**delta / X0**epsilon
 K = 1/Kinv
 # !!! Maximum amount allowed to pay for insurance
-betaMax = 20
+betaMax = 2E10
 
 def VC_prime(C):
     return ((C >= 0) * C + (C <= 0) * 1e-3) ** (delta - 1)
@@ -49,7 +49,7 @@ def WX(V_prime):
 def wealth_equation(X_prev, C, beta, r_t, R_t):
     return X_prev * (1 + r_t) - C - beta + R_t
 
-def backward_solve(X_T, r_t, alpha_t, pD_t, PbarD_t):
+def backward_solve(X_T, r_t, R_t,alpha_t, pD_t, PbarD_t):
     C = np.zeros(T)
     beta = np.zeros(T)
     X = np.zeros(T + 1)
@@ -69,9 +69,7 @@ def backward_solve(X_T, r_t, alpha_t, pD_t, PbarD_t):
             beta[t] = betaMax * (beta[t] >= 0)
             X[t] = (X[t+1] + C[t] + beta[t] - R_t[t]) / (1 + r_t[t])
             Y[t] = X[t] + beta[t] / alpha_t[t]
-        else:
-            X[t] = max(Y[t] - beta[t] / alpha_t[t], 0)
-            Y[t] = X[t] + beta[t] / alpha_t[t]
+       
     return X, C, beta
 
 def forward_solve(X0, C, beta, r_t, R_t):
@@ -81,14 +79,16 @@ def forward_solve(X0, C, beta, r_t, R_t):
         X[t + 1] = wealth_equation(X[t], C[t], beta[t], r_t[t], R_t[t])
     return X
 
-def fixed_point_function(X_T, X_init, r_t, alpha_t, pD_t, PbarD_t):
-    X_backward, C, beta = backward_solve(X_T, r_t, alpha_t, pD_t, PbarD_t)
+def fixed_point_function(X_T, X_init, r_t, R_t, alpha_t, pD_t, PbarD_t):
+    X_backward, C, beta = backward_solve(X_T, r_t, R_t, alpha_t, pD_t, PbarD_t)
     X_forward = forward_solve(X_init, C, beta, r_t, R_t)
     return X_forward[-1] - X_T
 
 # Run backward-forward model
-result = root_scalar(fixed_point_function, args=(X_init, r_t, alpha_t, pD_t, PbarD_t), x0=X_init, x1 = X_max,method='secant', xtol=1e-2)
-X_bf, C_bf, beta_bf = backward_solve(result.root, r_t, alpha_t, pD_t, PbarD_t)
+result = root_scalar(fixed_point_function, args=(X_init, r_t, R_t, alpha_t, pD_t, PbarD_t), x0=X_init, x1 = X_max,method='secant', xtol=1e-2)
+X_bf, C_bf, beta_bf = backward_solve(result.root, r_t, R_t, alpha_t, pD_t, PbarD_t)
+# !!! Recompute forward X in case of mismatch
+X_bf = forward_solve(X0,C_bf,beta_bf,r_t,R_t)
 
 # NN model parameters (aligned with backward-forward)
 J = 3200

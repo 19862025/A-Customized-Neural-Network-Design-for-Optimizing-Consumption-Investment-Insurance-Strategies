@@ -26,7 +26,7 @@ C0, X0 = 1, 1
 K = (delta/epsilon) *  X0**epsilon / C0**delta
 ki = 1/25.# scaling of interest rate inputs
 # Compensation parameters (agrees with notation in paper)
-a = 1.
+a = 0.6
 alpha_t = pd_t*a  # Scenario with scale = 1.0
 R_t = np.linspace(5, 7, T) # salary
 
@@ -34,13 +34,13 @@ R_t = np.linspace(5, 7, T) # salary
 # Interest rate parameters
 r_t = 0.02# Interest rate
 M = 3# Known previous interest rates
-N_nodes = [1]*T
+N_nodes = [5]*T
 
-sigma_Z = 0.0
-sigma_S = 0.0
-Z0 = 0.01
+sigma_Z = 0.00
+sigma_S = 0.00
+Z0 = 0.00
 
-J = 3200
+J = 4800
 nn_epoch  = 40
 
 # Generate non-stochastic data
@@ -48,6 +48,7 @@ np.random.seed(42)
 B_zt = np.random.normal(0, sigma_Z, (J, T+M))
 B_St = np.random.normal(0, sigma_S, (J, T+M))
 B_zt[:, 0] = 0
+# Relative interest rate, based on hidden process
 Z = Z0 + np.cumsum(B_zt, axis=-1)
 Irel = Z + B_St - r_t
 x_train = Irel/ki# Rescale inputs
@@ -74,7 +75,7 @@ def eval_totUtil_numpy(c, b, i, rho, s, M, ki, r, R, PbarD, pd, pD, delta, epsil
         s = s[None, :]
 
     s_tail = s[:, M:]  # shape: (batch, T)
-    w = 1 - c - b + r + rho * (1 + ki * s_tail)  # shape: (batch, T)
+    w = 1 - c - b + r + rho * ki * s_tail  # shape: (batch, T)
 
     # Compute x iteratively
     x_list = [np.ones((batch, 1)) * x_init]
@@ -97,21 +98,7 @@ def eval_totUtil_numpy(c, b, i, rho, s, M, ki, r, R, PbarD, pd, pD, delta, epsil
     finalUtil = VXfn(x[:, -1], epsilon, K) * PbarD[-1]
     totUtil = np.sum(legacyUtil + consumUtil, axis=1) + finalUtil  # shape: (batch,)
 
-    return totUtil
-
-
-c = 0.0*np.ones(T)
-
-b = 0.0*np.ones(T)
-
-i = 1.*np.ones(T)
-
-rho = 0*i
-
-s = x_train[0,:]
-
-gg = eval_totUtil_numpy(c,b,i,rho,s,M,ki,r_t,R_t,PbarD_t,pd_t,pD_t,delta,epsilon,K,x_init)
-
+    return x,consumUtil,legacyUtil,totUtil
 
 
 class CustomModel(Model):
@@ -146,6 +133,7 @@ class CustomModel(Model):
 
         for j in range(self.T):
             slice_input = s[:, :self.M + j]
+            slice_input = s[:, :self.M + j+1]# Current knowledge
             h = self.hidden_nets[j][0](slice_input)   # ReLU layer
             out = self.hidden_nets[j][1](h)           # Softmax layer
             c_list.append(out[:, 0])
@@ -189,6 +177,28 @@ class CustomModel(Model):
         totUtil = tf.reduce_sum(legacyUtil + consumUtil, axis=1) + finalUtil
 
         return -tf.expand_dims(totUtil, axis=1)  # shape (batch_size, 1)
+    
+    
+    def get_cbirho(self, s):
+        c_list, b_list, i_list, rho_list = [], [], [], []
+
+        for j in range(self.T):
+            slice_input = s[:, :self.M + j + 1]
+            h = self.hidden_nets[j][0](slice_input)
+            out = self.hidden_nets[j][1](h)
+            c_list.append(out[:, 0])
+            b_list.append(out[:, 1])
+            i_list.append(out[:, 2])
+            rho_list.append(out[:, 3])
+
+        # Stack into shape (batch_size, T)
+        c = tf.stack(c_list, axis=1)
+        b = tf.stack(b_list, axis=1)
+        i = tf.stack(i_list, axis=1)
+        rho = tf.stack(rho_list, axis=1)
+
+        return c, b, i, rho
+
 
 class MeanLossLogger(tf.keras.callbacks.Callback):
     def __init__(self, s_train):
@@ -230,3 +240,20 @@ full_model.fit(x_train, y_train,
 # 5. Get utility predictions (positive values)
 neg_util_values = full_model.predict(x_train)   # shape (num_samples, 1)
 util_values = -neg_util_values                  # shape (num_samples, 1)
+
+
+
+sample_input = x_train[0:1]  # Shape (1, T + M)
+
+# Get c, b, i, rho from the model
+c_vals, b_vals, i_vals, rho_vals = model.get_cbirho(tf.constant(sample_input, dtype=tf.float32))
+
+# Convert to numpy arrays for inspection
+c = c_vals.numpy().flatten()
+b = b_vals.numpy().flatten()
+i = i_vals.numpy().flatten()
+rho = rho_vals.numpy().flatten()
+
+
+s = x_train[0,:]
+[x,consumUtil,legacyUtil,totUtil] = eval_totUtil_numpy(c,b,i,rho,s,M,ki,r_t,R_t,PbarD_t,pd_t,pD_t,delta,epsilon,K,x_init)
